@@ -32,6 +32,14 @@
 //! batch shares one commitment per phase and a single FRI opening, so fixed
 //! costs amortize across transactions.
 //!
+//! ## Optional plaintext range proof
+//!
+//! [`prove_encryptions_with_range`] additionally proves that the integer
+//! encoded by the low `value_bits` message coefficients lies in `[0, bound)`,
+//! *without revealing it* — useful for confidential balances. The argument
+//! lives entirely in witness columns (degree ≤ 2, ~1 ms/ct), so it works
+//! identically under plain and hiding (zk) FRI. See [`air`] and [`RangeSpec`].
+//!
 //! ## Privacy
 //!
 //! Only evaluations of *public* polynomials (`a, b, c1, c2`) are published.
@@ -62,6 +70,28 @@
 //! let proof = prove_encryptions(&config, &params, &pk, &[ct.clone()], &[witness]);
 //! verify_encryptions(&config, &params, &pk, &[ct], &proof).unwrap();
 //! ```
+//!
+//! Bundling a range proof (prove the low 16 bits encode a value `< 50000`):
+//!
+//! ```rust
+//! use regev_plonky3::*;
+//! use rand::{rngs::SmallRng, RngExt, SeedableRng};
+//!
+//! let params = RegevParams { n: 256, eta: 2 };
+//! let mut rng = SmallRng::seed_from_u64(1);
+//! let (pk, _sk) = keygen(&mut rng, &params);
+//!
+//! let value: u64 = 31337;
+//! let mut m = vec![0u8; params.n];
+//! for i in 0..16 { m[i] = ((value >> i) & 1) as u8; }
+//! let (ct, witness) = encrypt(&mut rng, &params, &pk, &m);
+//!
+//! let spec = RangeSpec { value_bits: 16, bound: 50_000 };
+//! let config = test_config();
+//! let proof =
+//!     prove_encryptions_with_range(&config, &params, &pk, &[ct.clone()], &[witness], spec);
+//! verify_encryptions_with_range(&config, &params, &pk, &[ct], &proof, spec).unwrap();
+//! ```
 
 extern crate alloc;
 
@@ -74,9 +104,15 @@ pub mod prove;
 pub mod regev;
 pub mod stark;
 
-pub use config::{default_config, test_config, zk_config, Challenge, RegevStarkConfig, RegevZkStarkConfig, Val};
+pub use air::RangeSpec;
+pub use config::{
+    default_config, test_config, zk_config, Challenge, RegevStarkConfig, RegevZkStarkConfig, Val,
+};
 pub use params::RegevParams;
-pub use prove::{prove_encryptions, verify_encryptions, RegevProof, RegevVerifyError};
+pub use prove::{
+    prove_encryptions, prove_encryptions_with_range, verify_encryptions,
+    verify_encryptions_with_range, RegevProof, RegevVerifyError,
+};
 pub use regev::{
     decrypt, encrypt, keygen, Ciphertext, EncryptionWitness, PublicKey, SecretKey,
 };

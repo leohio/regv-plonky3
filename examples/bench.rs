@@ -95,4 +95,41 @@ fn main() {
             size / batch
         );
     }
+
+    // Encryption proof bundled with a 32-bit plaintext range proof
+    // (value in [0, 1_000_000)).
+    {
+        let spec = RangeSpec {
+            value_bits: 20,
+            bound: 1_000_000,
+        };
+        let batch = 8usize;
+        let mut cts = Vec::new();
+        let mut wits = Vec::new();
+        for k in 0..batch {
+            // encode a value in the low `value_bits` bits of the message
+            let value = (k as u64 * 111_111) % spec.bound;
+            let mut m = vec![0u8; n];
+            for (i, slot) in m.iter_mut().enumerate().take(spec.value_bits) {
+                *slot = ((value >> i) & 1) as u8;
+            }
+            let (ct, w) = encrypt(&mut rng, &params, &pk, &m);
+            cts.push(ct);
+            wits.push(w);
+        }
+        let t = Instant::now();
+        let proof = prove_encryptions_with_range(&config, &params, &pk, &cts, &wits, spec);
+        let prove_time = t.elapsed();
+        let t = Instant::now();
+        verify_encryptions_with_range(&config, &params, &pk, &cts, &proof, spec)
+            .expect("range verify");
+        let verify_time = t.elapsed();
+        let size = postcard::to_allocvec(&proof).unwrap().len();
+        println!(
+            "range b {batch}: prove {prove_time:>9.2?}  ({:>9.2?}/ct)   verify {verify_time:>9.2?}   proof {:>8} bytes ({} B/ct)",
+            prove_time / batch as u32,
+            size,
+            size / batch
+        );
+    }
 }

@@ -17,18 +17,20 @@
 //! > binary `m`, such that `c1 = a·r + e1` and `c2 = b·r + e2 + Δ·m` in
 //! > `Z_q[x]/(x^n + 1)`."
 //!
+//! With a [`RangeSpec`], the statement additionally asserts that the integer
+//! encoded by the low message bits lies in `[0, bound)` (see [`crate::air`]).
+//!
 //! # Verification structure
 //!
 //! 1. [`crate::stark::verify_batch`] checks all in-circuit constraints
-//!    (smallness, Horner evaluation columns, the two ring identities at the
-//!    random point `z`) and returns `z`.
+//!    (smallness, Horner evaluation columns, the ring identities at the
+//!    random point `z`, and — if enabled — the range argument) and returns `z`.
 //! 2. This wrapper recomputes `a(z), b(z), c1(z), c2(z)` from the *claimed*
 //!    statement and compares them to the evaluations published in the proof.
 //!    This binds the committed trace columns to the actual ciphertext: by
 //!    Schwartz-Zippel, agreement at the post-commitment challenge `z`
 //!    implies equality as polynomials (soundness error `< 2n / |EF|`,
 //!    about `2^-113` for `n = 1024` over the quartic BabyBear extension).
-
 
 use p3_air::DebugConstraintBuilder;
 use p3_air::symbolic::{SymbolicAirBuilder, SymbolicExpressionExt};
@@ -44,7 +46,9 @@ use p3_lookup::LookupAir;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_uni_stark::VerificationError;
 
-use crate::air::{generate_trace, public_values, RegevEncAir};
+use crate::air::{
+    generate_trace, generate_trace_with_range, public_values, RangeSpec, RegevEncAir,
+};
 use crate::params::RegevParams;
 use crate::regev::EncryptionWitness;
 use crate::regev::{Ciphertext, PublicKey, F};
@@ -80,12 +84,16 @@ impl<E: core::fmt::Debug> core::fmt::Display for RegevVerifyError<E> {
 
 impl<E: core::fmt::Debug> std::error::Error for RegevVerifyError<E> {}
 
-fn air_for<SC>(params: &RegevParams) -> RegevEncAir<Val<SC>>
+fn air_for<SC>(params: &RegevParams, range: Option<RangeSpec>) -> RegevEncAir<Val<SC>>
 where
     SC: StarkGenericConfig,
     Domain<SC>: PolynomialSpace<Val = F>,
 {
-    RegevEncAir::new(params.n, Val::<SC>::from_u32(RegevParams::delta()))
+    let delta = Val::<SC>::from_u32(RegevParams::delta());
+    match range {
+        Some(r) => RegevEncAir::new_with_range(params.n, delta, r),
+        None => RegevEncAir::new(params.n, delta),
+    }
 }
 
 /// Horner evaluation of a base-field coefficient vector at an extension
@@ -120,17 +128,64 @@ where
         + for<'a> Air<ProverConstraintFolderWithLookups<'a, SC>>
         + for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>,
 {
+    prove_inner(config, params, pk, ciphertexts, witnesses, None)
+}
+
+/// Prove correct encryption *and* a plaintext range proof for every
+/// ciphertext: the integer encoded by the low `range.value_bits` message
+/// bits lies in `[0, range.bound)`. The same `range` applies to all
+/// ciphertexts in the batch.
+pub fn prove_encryptions_with_range<SC>(
+    config: &SC,
+    params: &RegevParams,
+    pk: &PublicKey,
+    ciphertexts: &[Ciphertext],
+    witnesses: &[EncryptionWitness],
+    range: RangeSpec,
+) -> BatchProof<SC>
+where
+    SC: StarkGenericConfig,
+    Domain<SC>: PolynomialSpace<Val = F>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>: Algebra<SC::Challenge>,
+    Challenge<SC>: BasedVectorSpace<Val<SC>>,
+    RegevEncAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
+        + for<'a> Air<ProverConstraintFolderWithLookups<'a, SC>>
+        + for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>,
+{
+    prove_inner(config, params, pk, ciphertexts, witnesses, Some(range))
+}
+
+fn prove_inner<SC>(
+    config: &SC,
+    params: &RegevParams,
+    pk: &PublicKey,
+    ciphertexts: &[Ciphertext],
+    witnesses: &[EncryptionWitness],
+    range: Option<RangeSpec>,
+) -> BatchProof<SC>
+where
+    SC: StarkGenericConfig,
+    Domain<SC>: PolynomialSpace<Val = F>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>: Algebra<SC::Challenge>,
+    Challenge<SC>: BasedVectorSpace<Val<SC>>,
+    RegevEncAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
+        + for<'a> Air<ProverConstraintFolderWithLookups<'a, SC>>
+        + for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>,
+{
     assert!(!ciphertexts.is_empty(), "empty batch");
     assert_eq!(ciphertexts.len(), witnesses.len());
     assert_eq!(pk.a.len(), params.n);
 
-    let air = air_for::<SC>(params);
+    let air = air_for::<SC>(params, range);
     let airs = vec![air; ciphertexts.len()];
 
     let traces: Vec<RowMajorMatrix<Val<SC>>> = ciphertexts
         .iter()
         .zip(witnesses)
-        .map(|(ct, w)| generate_trace(pk, ct, w))
+        .map(|(ct, w)| match range {
+            Some(r) => generate_trace_with_range(pk, ct, w, r),
+            None => generate_trace(pk, ct, w),
+        })
         .collect();
 
     let instances: Vec<StarkInstance<'_, SC, RegevEncAir<Val<SC>>>> = airs
@@ -165,6 +220,47 @@ where
     RegevEncAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
         + for<'a> Air<VerifierConstraintFolderWithLookups<'a, SC>>,
 {
+    verify_inner(config, params, pk, ciphertexts, proof, None)
+}
+
+/// Verify a batched encryption proof that also carries a plaintext range
+/// proof. The verifier must supply the same `range` the prover used; a proof
+/// for any other range fails its constraints.
+pub fn verify_encryptions_with_range<SC>(
+    config: &SC,
+    params: &RegevParams,
+    pk: &PublicKey,
+    ciphertexts: &[Ciphertext],
+    proof: &BatchProof<SC>,
+    range: RangeSpec,
+) -> Result<(), RegevVerifyError<PcsError<SC>>>
+where
+    SC: StarkGenericConfig,
+    Domain<SC>: PolynomialSpace<Val = F>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>: Algebra<SC::Challenge>,
+    Challenge<SC>: BasedVectorSpace<Val<SC>>,
+    RegevEncAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
+        + for<'a> Air<VerifierConstraintFolderWithLookups<'a, SC>>,
+{
+    verify_inner(config, params, pk, ciphertexts, proof, Some(range))
+}
+
+fn verify_inner<SC>(
+    config: &SC,
+    params: &RegevParams,
+    pk: &PublicKey,
+    ciphertexts: &[Ciphertext],
+    proof: &BatchProof<SC>,
+    range: Option<RangeSpec>,
+) -> Result<(), RegevVerifyError<PcsError<SC>>>
+where
+    SC: StarkGenericConfig,
+    Domain<SC>: PolynomialSpace<Val = F>,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>: Algebra<SC::Challenge>,
+    Challenge<SC>: BasedVectorSpace<Val<SC>>,
+    RegevEncAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
+        + for<'a> Air<VerifierConstraintFolderWithLookups<'a, SC>>,
+{
     if ciphertexts.is_empty() {
         return Err(RegevVerifyError::Shape("empty batch"));
     }
@@ -181,14 +277,18 @@ where
         return Err(RegevVerifyError::Shape("trace height != ring dimension"));
     }
 
-    let mut air = air_for::<SC>(params);
+    // Rebuild the lookups (the evaluation arguments). The range proof adds no
+    // permutation columns and no preprocessed commitment — it lives entirely
+    // in the committed main trace — so there is nothing for the verifier to
+    // reconstruct beyond the lookup metadata.
+    let mut air = air_for::<SC>(params, range);
     let lookups = air.get_lookups();
     let airs = vec![air; ciphertexts.len()];
     let common = CommonData::new(None, vec![lookups; ciphertexts.len()]);
 
     let pvs: Vec<Vec<Val<SC>>> = ciphertexts.iter().map(|ct| public_values(pk, ct)).collect();
 
-    // Inner STARK: constraints, Horner columns, ring identities at z.
+    // Inner STARK: constraints, Horner columns, ring identities, range proof.
     let challenges = stark::verify_batch(config, &airs, proof, &pvs, &common)
         .map_err(RegevVerifyError::Stark)?;
 

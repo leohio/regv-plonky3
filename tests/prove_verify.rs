@@ -1,5 +1,6 @@
 //! End-to-end tests: encrypt → prove → verify, plus soundness checks that
 //! tampered statements and tampered proofs are rejected.
+#![allow(clippy::cloned_ref_to_slice_refs)] // `&[ct.clone()]` reads clearly in tests
 
 use p3_field::PrimeCharacteristicRing;
 use rand::rngs::SmallRng;
@@ -161,4 +162,192 @@ fn prove_verify_zero_knowledge_config() {
     let proof = prove_encryptions(&config, &TEST_PARAMS, &pk, &cts, &wits);
     assert!(proof.commitments.random.is_some(), "zk proof carries random commitment");
     verify_encryptions(&config, &TEST_PARAMS, &pk, &cts, &proof).expect("zk proof verifies");
+}
+
+// ---------------------------------------------------------------------------
+// Plaintext range proofs
+// ---------------------------------------------------------------------------
+
+/// Build a length-`n` binary message whose low `value_bits` coefficients
+/// encode `value` little-endian (high coefficients zero).
+fn message_for_value(value: u64, value_bits: usize, n: usize) -> Vec<u8> {
+    let mut m = vec![0u8; n];
+    for (i, slot) in m.iter_mut().enumerate().take(value_bits) {
+        *slot = ((value >> i) & 1) as u8;
+    }
+    m
+}
+
+fn setup_with_value(
+    seed: u64,
+    value: u64,
+    value_bits: usize,
+) -> (PublicKey, SecretKey, Ciphertext, EncryptionWitness) {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let (pk, sk) = keygen(&mut rng, &TEST_PARAMS);
+    let m = message_for_value(value, value_bits, TEST_PARAMS.n);
+    let (ct, w) = encrypt(&mut rng, &TEST_PARAMS, &pk, &m);
+    (pk, sk, ct, w)
+}
+
+#[test]
+fn range_proof_accepts_in_range() {
+    let spec = RangeSpec {
+        value_bits: 16,
+        bound: 1000,
+    };
+    let (pk, sk, ct, w) = setup_with_value(20, 742, spec.value_bits);
+    // decrypt recovers the message encoding 742.
+    assert_eq!(
+        decrypt(&TEST_PARAMS, &sk, &ct),
+        message_for_value(742, spec.value_bits, TEST_PARAMS.n)
+    );
+
+    let config = test_config();
+    let proof = prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], spec);
+    verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &proof, spec)
+        .expect("in-range proof verifies");
+}
+
+#[test]
+fn range_proof_boundary_values() {
+    let spec = RangeSpec {
+        value_bits: 12,
+        bound: 4096, // == 2^12, so value can be 0..=4095
+    };
+    let config = test_config();
+    for value in [0u64, 1, 4095] {
+        let (pk, _, ct, w) = setup_with_value(21 + value, value, spec.value_bits);
+        let proof =
+            prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], spec);
+        verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &proof, spec)
+            .unwrap_or_else(|e| panic!("value {value} should verify: {e}"));
+    }
+}
+
+#[test]
+#[should_panic(expected = "is not in")]
+fn range_proof_prover_rejects_out_of_range() {
+    let spec = RangeSpec {
+        value_bits: 16,
+        bound: 500,
+    };
+    // value 742 >= bound 500: the prover cannot build a valid witness.
+    let (pk, _, ct, w) = setup_with_value(22, 742, spec.value_bits);
+    let config = test_config();
+    let _ = prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &[w], spec);
+}
+
+#[test]
+fn range_proof_verifier_rejects_different_bound() {
+    let prove_spec = RangeSpec {
+        value_bits: 16,
+        bound: 1000,
+    };
+    let (pk, _, ct, w) = setup_with_value(23, 742, prove_spec.value_bits);
+    let config = test_config();
+    let proof =
+        prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], prove_spec);
+
+    // The proof was for bound 1000; a verifier checking bound 800 (which 742
+    // also satisfies) must still reject — the committed accumulator encodes
+    // bound-1 = 999, not 799.
+    let verify_spec = RangeSpec {
+        value_bits: 16,
+        bound: 800,
+    };
+    assert!(
+        verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &proof, verify_spec)
+            .is_err()
+    );
+}
+
+#[test]
+fn range_proof_plain_verifier_rejects_ranged_proof() {
+    // A proof produced with a range argument has a different trace width and
+    // preprocessed commitment, so the plain (no-range) verifier rejects it.
+    let spec = RangeSpec {
+        value_bits: 16,
+        bound: 1000,
+    };
+    let (pk, _, ct, w) = setup_with_value(24, 100, spec.value_bits);
+    let config = test_config();
+    let proof = prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], spec);
+    assert!(verify_encryptions(&config, &TEST_PARAMS, &pk, &[ct], &proof).is_err());
+}
+
+#[test]
+fn range_proof_batch() {
+    let spec = RangeSpec {
+        value_bits: 20,
+        bound: 1_000_000,
+    };
+    let mut rng = SmallRng::seed_from_u64(25);
+    let (pk, _) = keygen(&mut rng, &TEST_PARAMS);
+    let values = [0u64, 1, 12345, 999_999];
+    let mut cts = Vec::new();
+    let mut wits = Vec::new();
+    for &v in &values {
+        let m = message_for_value(v, spec.value_bits, TEST_PARAMS.n);
+        let (ct, w) = encrypt(&mut rng, &TEST_PARAMS, &pk, &m);
+        cts.push(ct);
+        wits.push(w);
+    }
+    let config = test_config();
+    let proof = prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &cts, &wits, spec);
+    verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &cts, &proof, spec)
+        .expect("batched range proof verifies");
+}
+
+#[test]
+fn range_proof_zero_knowledge() {
+    let spec = RangeSpec {
+        value_bits: 16,
+        bound: 50000,
+    };
+    let (pk, _, ct, w) = setup_with_value(26, 31337, spec.value_bits);
+    let config = regev_plonky3::config::zk_config_seeded(SmallRng::seed_from_u64(7));
+    let proof = prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], spec);
+    verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &proof, spec)
+        .expect("zk range proof verifies");
+}
+
+#[test]
+fn range_proof_value_uses_full_window() {
+    // A value that needs the *high* bit of the window (bit 15) must still be
+    // bound — the count constraint forces exactly `value_bits` active bits,
+    // so a malicious prover cannot shrink the window to drop the high bit.
+    let spec = RangeSpec {
+        value_bits: 16,
+        bound: 1 << 16,
+    };
+    let value = (1u64 << 15) | 7; // high bit set
+    let (pk, _, ct, w) = setup_with_value(27, value, spec.value_bits);
+    let config = test_config();
+    let proof = prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], spec);
+    verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &proof, spec)
+        .expect("high-bit value within 2^16 verifies");
+}
+
+#[test]
+fn range_proof_verifier_rejects_different_value_bits() {
+    let prove_spec = RangeSpec {
+        value_bits: 16,
+        bound: 1000,
+    };
+    let (pk, _, ct, w) = setup_with_value(28, 742, prove_spec.value_bits);
+    let config = test_config();
+    let proof =
+        prove_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct.clone()], &[w], prove_spec);
+
+    // Verifier insists on value_bits = 20; the committed cnt accumulator
+    // encodes 16, so the cnt[0] = value_bits constraint fails.
+    let verify_spec = RangeSpec {
+        value_bits: 20,
+        bound: 1000,
+    };
+    assert!(
+        verify_encryptions_with_range(&config, &TEST_PARAMS, &pk, &[ct], &proof, verify_spec)
+            .is_err()
+    );
 }
