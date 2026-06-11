@@ -32,6 +32,36 @@
 //! batch shares one commitment per phase and a single FRI opening, so fixed
 //! costs amortize across transactions.
 //!
+//! ## Value-level additive homomorphism
+//!
+//! Messages are scaled by `Δ = floor(q/t)` with plaintext modulus
+//! `t = 2^plain_bits` (default 256), and decryption decodes per-coefficient
+//! **digits** in `[0, t)`. With values encoded as little-endian bits over
+//! the coefficients, ciphertext addition is exact integer addition:
+//!
+//! ```rust
+//! # use regev_plonky3::*;
+//! # use rand::{rngs::SmallRng, SeedableRng};
+//! # let params = RegevParams { n: 256, eta: 2, plain_bits: 8 };
+//! # let mut rng = SmallRng::seed_from_u64(0);
+//! # let (pk, sk) = keygen(&mut rng, &params);
+//! let (ct_a, _) = encrypt(&mut rng, &params, &pk, &encode_value_message(5, params.n));
+//! let (ct_b, _) = encrypt(&mut rng, &params, &pk, &encode_value_message(3, params.n));
+//! let sum = add_ciphertexts(&ct_a, &ct_b);
+//! assert_eq!(decrypt_value(&params, &sk, &sum), 8);
+//! ```
+//!
+//! Valid for up to `t − 1` stacked additions (digit headroom) within a noise
+//! budget of `Δ/2` (thousands of additions). See [`regev`] for details.
+//!
+//! ## Transfer proofs
+//!
+//! [`prove_transfers`] proves, per instance, that three ciphertexts
+//! (`before`, `delta`, `after`) are well-formed encryptions **and** that
+//! `before = after + delta` as n-bit integers, via a ripple-carry column —
+//! conservation plus no-underflow for confidential balances. See
+//! [`transfer`].
+//!
 //! ## Optional plaintext range proof
 //!
 //! [`prove_encryptions_with_range`] additionally proves that the integer
@@ -58,7 +88,7 @@
 //! use regev_plonky3::*;
 //! use rand::{rngs::SmallRng, RngExt, SeedableRng};
 //!
-//! let params = RegevParams { n: 256, eta: 2 }; // use N1024/N2048 in production
+//! let params = RegevParams { n: 256, eta: 2, plain_bits: 8 }; // use N1024/N2048 in production
 //! let mut rng = SmallRng::seed_from_u64(42);
 //! let (pk, sk) = keygen(&mut rng, &params);
 //!
@@ -77,7 +107,7 @@
 //! use regev_plonky3::*;
 //! use rand::{rngs::SmallRng, RngExt, SeedableRng};
 //!
-//! let params = RegevParams { n: 256, eta: 2 };
+//! let params = RegevParams { n: 256, eta: 2, plain_bits: 8 };
 //! let mut rng = SmallRng::seed_from_u64(1);
 //! let (pk, _sk) = keygen(&mut rng, &params);
 //!
@@ -103,6 +133,7 @@ pub mod params;
 pub mod prove;
 pub mod regev;
 pub mod stark;
+pub mod transfer;
 
 pub use air::RangeSpec;
 pub use config::{
@@ -114,5 +145,7 @@ pub use prove::{
     verify_encryptions_with_range, RegevProof, RegevVerifyError,
 };
 pub use regev::{
-    decrypt, encrypt, keygen, Ciphertext, EncryptionWitness, PublicKey, SecretKey,
+    add_ciphertexts, decrypt, decrypt_value, encode_value_message, encrypt, keygen, Ciphertext,
+    EncryptionWitness, PublicKey, SecretKey,
 };
+pub use transfer::{prove_transfers, verify_transfers, Transfer, TransferWitness};

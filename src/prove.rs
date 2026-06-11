@@ -89,7 +89,7 @@ where
     SC: StarkGenericConfig,
     Domain<SC>: PolynomialSpace<Val = F>,
 {
-    let delta = Val::<SC>::from_u32(RegevParams::delta());
+    let delta = Val::<SC>::from_u32(params.delta());
     match range {
         Some(r) => RegevEncAir::new_with_range(params.n, delta, r),
         None => RegevEncAir::new(params.n, delta),
@@ -98,7 +98,7 @@ where
 
 /// Horner evaluation of a base-field coefficient vector at an extension
 /// field point: `P(z) = Σ_i p_i z^i`.
-fn eval_at<SC>(coeffs: &[Val<SC>], z: SC::Challenge) -> SC::Challenge
+pub(crate) fn eval_at<SC>(coeffs: &[Val<SC>], z: SC::Challenge) -> SC::Challenge
 where
     SC: StarkGenericConfig,
 {

@@ -3,9 +3,26 @@
 //!
 //! KeyGen:  `s ← ternary`, `e ← CBD(η)`, `b = a·s + e` for uniform `a`.
 //! Encrypt: `r ← ternary`, `e1, e2 ← CBD(η)`,
-//!          `c1 = a·r + e1`, `c2 = b·r + e2 + Δ·m` with `m ∈ {0,1}[x]`.
+//!          `c1 = a·r + e1`, `c2 = b·r + e2 + Δ·m` with `m ∈ {0,1}[x]`,
+//!          where `Δ = floor(q / t)`, `t = 2^plain_bits`.
 //! Decrypt: `v = c2 − c1·s = Δ·m + (e·r − e1·s + e2)`; round each
-//!          coefficient to a bit.
+//!          coefficient to the nearest multiple of `Δ`, giving a **digit**
+//!          in `[0, t)` per coefficient.
+//!
+//! # Additive homomorphism (value level)
+//!
+//! Ciphertext addition is coefficient-wise; since each plaintext slot has
+//! digit headroom `t` (not just `{0,1}`), sums do **not** wrap mod 2:
+//!
+//! ```text
+//! decrypt_value(add_ciphertexts(Enc(A), Enc(B))) = A + B
+//! ```
+//!
+//! where values are encoded as little-endian bits over the coefficients
+//! ([`encode_value_message`]) and decoded as `Σ dᵢ·2^i` over the digits
+//! ([`decrypt_value`]). The bit-weights make this exact without any carry
+//! logic: `Σ(aᵢ+bᵢ)2^i = Σaᵢ2^i + Σbᵢ2^i`. Valid for up to `t − 1` stacked
+//! additions (per-coefficient digits must stay below `t`).
 //!
 //! [`encrypt`] also returns an [`EncryptionWitness`] containing everything
 //! the STARK prover needs, including the quotient polynomials `k1, k2` of
@@ -155,7 +172,7 @@ pub fn encrypt<R: Rng>(
     let r_f = small_to_field(&r);
     let e1 = cbd_to_field(&e1u, &e1v);
     let e2 = cbd_to_field(&e2u, &e2v);
-    let delta = F::from_u32(RegevParams::delta());
+    let delta = F::from_u32(params.delta());
 
     // c1 = a·r + e1 mod (x^n + 1); k1 is the quotient of a·r.
     let (ar_lo, k1) = split_negacyclic(&full_poly_mul(&pk.a, &r_f), n);
@@ -185,20 +202,66 @@ pub fn encrypt<R: Rng>(
     )
 }
 
-/// Decrypt; returns the binary message polynomial.
+/// Decrypt; returns one **digit** in `[0, t)` per coefficient.
+///
+/// For a fresh ciphertext the digits are the message bits. For a
+/// homomorphic sum of `k` ciphertexts the digits are the per-coefficient
+/// sums (correct as long as `k < t` and the accumulated noise stays below
+/// `Δ/2`).
 pub fn decrypt(params: &RegevParams, sk: &SecretKey, ct: &Ciphertext) -> Vec<u8> {
+    params.validate();
     let n = params.n;
     let s_f = small_to_field(&sk.s);
     let (c1s, _) = split_negacyclic(&full_poly_mul(&ct.c1, &s_f), n);
-    let q = BabyBear::ORDER_U32 as i64;
+    let q = BabyBear::ORDER_U32 as u64;
+    let t = params.t() as u64;
     ct.c2
         .iter()
         .zip(c1s)
         .map(|(&c2i, c1si)| {
-            let v = (c2i - c1si).as_canonical_u32() as i64;
-            // m = 1 iff v is closer to Δ ≈ q/2 than to 0 (mod q).
-            (v > q / 4 && v < 3 * q / 4) as u8
+            let v = (c2i - c1si).as_canonical_u32() as u64;
+            // digit = round(v·t/q) mod t  (the mod folds negative noise,
+            // which lifts v near q, back to digit 0).
+            (((v * t + q / 2) / q) % t) as u8
         })
+        .collect()
+}
+
+/// Decrypt and decode the value `Σ dᵢ·2^i` from the coefficient digits.
+///
+/// This is the value-level inverse of [`encode_value_message`] and is
+/// additive under [`add_ciphertexts`]. Panics if a nonzero digit sits at a
+/// coefficient index too high to fit the result in `u128`.
+pub fn decrypt_value(params: &RegevParams, sk: &SecretKey, ct: &Ciphertext) -> u128 {
+    let digits = decrypt(params, sk, ct);
+    let mut value: u128 = 0;
+    for (i, &d) in digits.iter().enumerate() {
+        if d != 0 {
+            assert!(i < 120, "nonzero digit at coefficient {i}: value overflows u128");
+            value += (d as u128) << i;
+        }
+    }
+    value
+}
+
+/// Coefficient-wise ciphertext addition: `Enc(A) ⊞ Enc(B)` decrypts to the
+/// digit-wise sum, i.e. [`decrypt_value`] yields `A + B` (within the digit
+/// and noise budgets — see module docs).
+pub fn add_ciphertexts(a: &Ciphertext, b: &Ciphertext) -> Ciphertext {
+    assert_eq!(a.c1.len(), b.c1.len());
+    Ciphertext {
+        c1: a.c1.iter().zip(&b.c1).map(|(&x, &y)| x + y).collect(),
+        c2: a.c2.iter().zip(&b.c2).map(|(&x, &y)| x + y).collect(),
+    }
+}
+
+/// Encode an integer as a little-endian binary message polynomial of length
+/// `n` (the canonical value encoding used by [`decrypt_value`] and the
+/// plaintext range proof).
+pub fn encode_value_message(value: u64, n: usize) -> Vec<u8> {
+    assert!(n >= 64 || value < (1u64 << n), "value does not fit in n bits");
+    (0..n)
+        .map(|i| if i < 64 { ((value >> i) & 1) as u8 } else { 0 })
         .collect()
 }
 
@@ -210,7 +273,7 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let params = RegevParams { n: 256, eta: 2 };
+        let params = RegevParams { n: 256, eta: 2, plain_bits: 8 };
         let mut rng = SmallRng::seed_from_u64(7);
         let (pk, sk) = keygen(&mut rng, &params);
         for _ in 0..10 {
@@ -222,7 +285,7 @@ mod tests {
 
     #[test]
     fn witness_satisfies_ring_identities() {
-        let params = RegevParams { n: 128, eta: 2 };
+        let params = RegevParams { n: 128, eta: 2, plain_bits: 8 };
         let mut rng = SmallRng::seed_from_u64(8);
         let (pk, _) = keygen(&mut rng, &params);
         let m: Vec<u8> = (0..params.n).map(|_| rng.random_range(0..=1)).collect();

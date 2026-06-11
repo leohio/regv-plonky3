@@ -17,7 +17,7 @@ fn main() {
         .nth(1)
         .map(|s| s.parse().expect("n must be a power of two"))
         .unwrap_or(1024);
-    let params = RegevParams { n, eta: 2 };
+    let params = RegevParams { n, eta: 2, plain_bits: 8 };
 
     let mut rng = SmallRng::seed_from_u64(0xbeef);
     let (pk, sk) = keygen(&mut rng, &params);
@@ -131,5 +131,54 @@ fn main() {
             size,
             size / batch
         );
+    }
+
+    // Transfer proofs: 3 ciphertexts per transfer (before/delta/after) plus
+    // the in-circuit conservation law before = after + delta.
+    {
+        let batch = 8usize;
+        let mut ts = Vec::new();
+        let mut ws = Vec::new();
+        for k in 0..batch as u64 {
+            let before_v = 1_000_000 + k * 999;
+            let delta_v = 12_345 + k;
+            let after_v = before_v - delta_v;
+            let (before, w_b) = encrypt(&mut rng, &params, &pk, &encode_value_message(before_v, n));
+            let (delta, w_d) = encrypt(&mut rng, &params, &pk, &encode_value_message(delta_v, n));
+            let (after, w_a) = encrypt(&mut rng, &params, &pk, &encode_value_message(after_v, n));
+            ts.push(Transfer {
+                before,
+                delta,
+                after,
+            });
+            ws.push(TransferWitness {
+                before: w_b,
+                delta: w_d,
+                after: w_a,
+            });
+        }
+        let t = Instant::now();
+        let proof = prove_transfers(&config, &params, &pk, &ts, &ws);
+        let prove_time = t.elapsed();
+        let t = Instant::now();
+        verify_transfers(&config, &params, &pk, &ts, &proof).expect("transfer verify");
+        let verify_time = t.elapsed();
+        let size = postcard::to_allocvec(&proof).unwrap().len();
+        println!(
+            "xfer  b {batch}: prove {prove_time:>9.2?}  ({:>9.2?}/tx)   verify {verify_time:>9.2?}   proof {:>8} bytes ({} B/tx)",
+            prove_time / batch as u32,
+            size,
+            size / batch
+        );
+    }
+
+    // Homomorphic addition demo: decrypt(Enc(5) + Enc(3)) = 8.
+    {
+        let (ca, _) = encrypt(&mut rng, &params, &pk, &encode_value_message(5, n));
+        let (cb, _) = encrypt(&mut rng, &params, &pk, &encode_value_message(3, n));
+        let sum = add_ciphertexts(&ca, &cb);
+        let v = decrypt_value(&params, &sk, &sum);
+        println!("homomorphic: decrypt_value(Enc(5) + Enc(3)) = {v}");
+        assert_eq!(v, 8);
     }
 }

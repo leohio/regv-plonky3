@@ -7,7 +7,7 @@ use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use regev_plonky3::*;
 
-const TEST_PARAMS: RegevParams = RegevParams { n: 256, eta: 2 };
+const TEST_PARAMS: RegevParams = RegevParams { n: 256, eta: 2, plain_bits: 8 };
 
 fn setup(
     seed: u64,
@@ -94,7 +94,7 @@ fn rejects_malicious_prover_with_forged_columns() {
     let config = test_config();
     let air = RegevEncAir::new(
         TEST_PARAMS.n,
-        Val::from_u32(RegevParams::delta()),
+        Val::from_u32(TEST_PARAMS.delta()),
     );
     // Trace for the forged ciphertext, public values for the real one.
     let trace = generate_trace(&pk, &forged_ct, &forged_wit);

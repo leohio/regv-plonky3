@@ -1,9 +1,10 @@
 # regev-plonky3
 
-A Plonky3-friendly **Regev (Ring-LWE) public-key encryption** scheme with batched
-**STARK proofs of correct encryption** — and an optional **plaintext range
-proof** that can be bundled into the same proof. The whole design is organised
-around making the proof circuit as small as possible.
+A Plonky3-friendly **Regev (Ring-LWE) public-key encryption** scheme with
+**value-level additive homomorphism**, batched **STARK proofs of correct
+encryption**, an optional **plaintext range proof**, and a **transfer proof**
+(`before = after + delta` over encrypted balances). The whole design is
+organised around making the proof circuit as small as possible.
 
 The proof circuit (the AIR / constraint system) lives entirely in this repo
 ([`src/air.rs`](src/air.rs)); [`src/stark/`](src/stark) is a ~30-line-diff
@@ -18,6 +19,8 @@ Merkle commitments, Poseidon2, the field) comes from the published
 | smallness via **degree-3 vanishing constraints** | ternary `r` and CBD(η=2) noise checked with zero auxiliary columns |
 | one ciphertext = one `p3-batch-stark` instance | one commitment per phase + one FRI opening for the whole batch; fixed costs amortise |
 | plaintext range proof entirely in the **witness trace** | works identically under plain and hiding (zk) FRI; no preprocessed commitment to reconstruct |
+| plaintext modulus `t = 2^plain_bits` with digit decoding (`Δ = ⌊q/t⌋`) | ciphertext addition is **value-level additive**: `decrypt_value(Enc(A) ⊞ Enc(B)) = A + B` |
+| transfer AIR with a **ripple-carry column** | proves `before = after + delta` over three encrypted values in one instance, all degree ≤ 2 |
 
 ---
 
@@ -64,8 +67,9 @@ Reproduce with `cargo run --release --example bench`.
 | batch of 1 | 11.3 ms | 11.3 ms | 11.7 ms | 226 KB | 226 KB |
 | batch of 8 | 42.4 ms | 5.3 ms | 18.4 ms | 415 KB | 52 KB |
 | batch of 32 | 163 ms | 5.1 ms | 43.4 ms | 1.06 MB | 33 KB |
-| zk, batch of 8 (`zk_config`) | 234 ms | 29.3 ms | 3.7 ms | 551 KB | 69 KB |
-| + range proof, batch of 8 | 51.0 ms | 6.4 ms | 19.8 ms | 433 KB | 54 KB |
+| zk, batch of 8 (`zk_config`) | 230 ms | 28.7 ms | 4.4 ms | 551 KB | 69 KB |
+| + range proof, batch of 8 | 45.4 ms | 5.7 ms | 20.3 ms | 433 KB | 54 KB |
+| transfer (3 cts + conservation), batch of 8 | 58.0 ms | 7.3 ms/tx | 30.8 ms | 722 KB | 90 KB/tx |
 
 Takeaways:
 
@@ -75,6 +79,9 @@ Takeaways:
   encryption proof (it adds 5 witness columns, all degree-≤2 constraints).
 - **ZK costs ~2× to prove** (hiding commitments + randomized quotient chunks,
   and a Keccak-based MMCS) but verifies fast.
+- **A transfer is cheaper than 3 separate encryption proofs** (7.3 ms vs
+  ~16 ms): the three ciphertexts share one instance, one set of `a, b`
+  columns and one evaluation challenge.
 
 ---
 
@@ -86,7 +93,7 @@ knowledge of `r, e₁, e₂, m` such that, in `Z_q[x]/(xⁿ+1)`:
 ```
 c₁ = a·r + e₁                  r  ∈ {-1,0,1}ⁿ   (ternary)
 c₂ = b·r + e₂ + Δ·m            e₁, e₂ ∈ [-2,2]ⁿ  (CBD η=2)
-                               m  ∈ {0,1}ⁿ,  Δ = ⌊q/2⌋
+                               m  ∈ {0,1}ⁿ,  Δ = ⌊q/t⌋, t = 2^plain_bits
 ```
 
 With a range proof attached, the statement additionally asserts that the
@@ -138,6 +145,102 @@ same pipeline over Plonky3's `HidingFriPcs` (hiding Merkle commitments,
 masked polynomials, randomized quotient chunks) for statistical zk. Note
 hiding FRI requires `log_blowup ≥ 2` — with blowup 1 the masked polynomials
 have rate 1 and verification fails.
+
+---
+
+## Additive homomorphism (value level)
+
+Messages are scaled by `Δ = ⌊q/t⌋` with plaintext modulus `t = 2^plain_bits`
+(default `t = 256`), and decryption decodes each coefficient to a **digit**
+in `[0, t)` rather than a single bit. Values are encoded as little-endian
+bits across coefficients; because radix-2 weights are linear, ciphertext
+addition is exact integer addition with **no carry logic needed**:
+
+```text
+Σ (aᵢ + bᵢ) · 2^i  =  Σ aᵢ·2^i + Σ bᵢ·2^i
+```
+
+```rust
+use regev_plonky3::*;
+use rand::{rngs::SmallRng, SeedableRng};
+
+let params = RegevParams::N1024;
+let mut rng = SmallRng::seed_from_u64(0);
+let (pk, sk) = keygen(&mut rng, &params);
+
+let (ct_a, _) = encrypt(&mut rng, &params, &pk, &encode_value_message(5, params.n));
+let (ct_b, _) = encrypt(&mut rng, &params, &pk, &encode_value_message(3, params.n));
+
+let ct_sum = add_ciphertexts(&ct_a, &ct_b);
+assert_eq!(decrypt_value(&params, &sk, &ct_sum), 8);   // not 5 XOR 3 = 6!
+```
+
+Budgets (default `plain_bits = 8`):
+
+- **digits**: each coefficient digit must stay below `t`, so up to `t − 1 =
+  255` stacked additions of binary-encoded values;
+- **noise**: total noise must stay below `Δ/2 ≈ 2^22`; fresh-ciphertext noise
+  is a few hundred, so thousands of additions — digits bind first.
+
+`plain_bits` trades addition depth against noise margin and is a public
+parameter (it does not affect lattice security, only correctness).
+
+Combined with the encryption proofs this gives **verified homomorphic
+sums**: verify the proofs of the input ciphertexts, then add them publicly —
+by linearity the result is guaranteed to encrypt the sum of the proven
+values (see the `homomorphic_sum_of_proven_ciphertexts` test).
+
+---
+
+## Transfer proofs: `before = after + delta`
+
+For confidential-balance flows you also want the *opposite direction*: given
+three independently encrypted values, prove in zero-knowledge that they
+satisfy a conservation law. `prove_transfers` does this in a single STARK
+instance per transfer:
+
+> all three of `before`, `delta`, `after` are well-formed encryptions under
+> `(a, b)`, **and** `before = after + delta` as n-bit integers.
+
+Since `after` and `delta` are committed *bit vectors* (hence non-negative)
+and the addition is exact, this simultaneously gives **no-underflow**:
+`delta ≤ before` is implied. A third party can verify that a balance update
+is conserving without learning any of the three values.
+
+```rust,ignore
+let (before, w_b) = encrypt(&mut rng, &params, &pk, &encode_value_message(100, n));
+let (delta,  w_d) = encrypt(&mut rng, &params, &pk, &encode_value_message(42, n));
+let (after,  w_a) = encrypt(&mut rng, &params, &pk, &encode_value_message(58, n));
+
+let t = Transfer { before, delta, after };
+let w = TransferWitness { before: w_b, delta: w_d, after: w_a };
+
+let proof = prove_transfers(&config, &params, &pk, &[t.clone()], &[w]);
+verify_transfers(&config, &params, &pk, &[t], &proof)?;
+```
+
+### How it works
+
+The three message-bit columns are wired through a **ripple-carry adder**,
+one bit per row, with a single extra carry column `c`:
+
+```text
+after[i] + delta[i] + c[i] = before[i] + 2·c[i+1]    (transition rows)
+c[0] = 0                                             (first row)
+after[n-1] + delta[n-1] + c[n-1] = before[n-1]       (last row ⇒ carry-out 0)
+c[i] ∈ {0, 1}
+```
+
+All degree ≤ 2; the zero carry-out makes the equation hold over the
+integers, not mod `2^n`. The instance has 33 main columns (shared `a, b` +
+10 per ciphertext + carry) and 26 permutation columns (Horner evaluations;
+`a, b, c1, c2`×3 exposed, witness evaluations hidden), so one transfer is
+cheaper than three separate encryption proofs.
+
+To additionally cap the amount (e.g. `delta < 2^16`), run a range-proof
+instance on the same `delta` ciphertext — both proofs bind to the identical
+public ciphertext, so accepting both yields conservation **and** the cap
+(see the `transfer_composes_with_delta_range_proof` test).
 
 ---
 
@@ -243,6 +346,8 @@ add them.
 | `keygen` / `encrypt` / `decrypt` | the Ring-LWE scheme |
 | `prove_encryptions` / `verify_encryptions` | batched proof of correct encryption |
 | `prove_encryptions_with_range` / `verify_encryptions_with_range` | same, plus a plaintext range proof |
+| `prove_transfers` / `verify_transfers` | batched proof of `before = after + delta` over encrypted values |
+| `add_ciphertexts` / `decrypt_value` / `encode_value_message` | value-level homomorphic addition |
 | `default_config` | succinct, non-zk (plain FRI) |
 | `zk_config` | statistical zero-knowledge (hiding FRI) |
 | `test_config` | **insecure**, tiny parameters, for tests only |
@@ -286,6 +391,7 @@ src/params.rs  parameter sets (q is pinned to BabyBear)
 src/gadget.rs  EvalGadget: Horner evaluation argument as a LookupGadget
 src/air.rs     RegevEncAir: columns, smallness, ring identities, range proof
 src/stark/     vendored p3-batch-stark prover/verifier (gadget swapped)
+src/transfer.rs transfer AIR (ripple-carry conservation) + prove/verify
 src/prove.rs   prove/verify wrappers (+ statement binding, range variants)
 src/config.rs  BabyBear + Poseidon2 + (plain / hiding) FRI configs
 ```
@@ -299,6 +405,8 @@ and [`tests/zk_debug.rs`](tests/zk_debug.rs) (hiding-FRI isolation tests).
 ## Future work
 
 - Limb-decomposed range proofs for values wider than 29 bits (64-bit balances).
+- Fold the delta range cap directly into the transfer AIR (currently a
+  second, composed instance).
 - Poseidon2-based hiding MMCS for a faster zk prover (current `zk_config`
   uses Keccak, ~5× slower hashing than the non-zk Poseidon2 config).
 - Observe `(a, b)` once per batch instead of per instance (the verifier is
