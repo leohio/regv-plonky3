@@ -68,4 +68,31 @@ fn main() {
             assert_eq!(&decrypt(&params, &sk, ct), m);
         }
     }
+
+    // Zero-knowledge variant.
+    {
+        let zk = zk_config();
+        let batch = 8usize;
+        let mut cts = Vec::new();
+        let mut wits = Vec::new();
+        for _ in 0..batch {
+            let m: Vec<u8> = (0..n).map(|_| rng.random_range(0..=1)).collect();
+            let (ct, w) = encrypt(&mut rng, &params, &pk, &m);
+            cts.push(ct);
+            wits.push(w);
+        }
+        let t = Instant::now();
+        let proof = prove_encryptions(&zk, &params, &pk, &cts, &wits);
+        let prove_time = t.elapsed();
+        let t = Instant::now();
+        verify_encryptions(&zk, &params, &pk, &cts, &proof).expect("zk verify");
+        let verify_time = t.elapsed();
+        let size = postcard::to_allocvec(&proof).unwrap().len();
+        println!(
+            "zk batch {batch}: prove {prove_time:>9.2?}  ({:>9.2?}/ct)   verify {verify_time:>9.2?}   proof {:>8} bytes ({} B/ct)",
+            prove_time / batch as u32,
+            size,
+            size / batch
+        );
+    }
 }

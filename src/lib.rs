@@ -39,9 +39,10 @@
 //! the (committed) permutation trace and enter the ring identities as
 //! in-circuit constraints — publishing them would leak ~128 bits of
 //! information per polynomial and allow dictionary attacks on low-entropy
-//! messages. Note the default config is *succinct but not zero-knowledge*
-//! (plain FRI); for full zk, instantiate the same pipeline with Plonky3's
-//! `HidingFriPcs`.
+//! messages. The default config is succinct but not zero-knowledge (plain
+//! FRI); use [`config::zk_config`] (hiding FRI commitments + randomized
+//! quotient chunks) when the proof itself must leak nothing about the
+//! witness.
 //!
 //! ## Quick start
 //!
@@ -73,7 +74,7 @@ pub mod prove;
 pub mod regev;
 pub mod stark;
 
-pub use config::{default_config, test_config, Challenge, RegevStarkConfig, Val};
+pub use config::{default_config, test_config, zk_config, Challenge, RegevStarkConfig, RegevZkStarkConfig, Val};
 pub use params::RegevParams;
 pub use prove::{prove_encryptions, verify_encryptions, RegevProof, RegevVerifyError};
 pub use regev::{

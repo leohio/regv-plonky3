@@ -150,3 +150,15 @@ fn rejects_swapped_instances() {
     let swapped = vec![cts[1].clone(), cts[0].clone()];
     assert!(verify_encryptions(&config, &TEST_PARAMS, &pk, &swapped, &proof).is_err());
 }
+
+#[test]
+fn prove_verify_zero_knowledge_config() {
+    use rand::rngs::SmallRng as ZkRng;
+    let (pk, _, _, cts, wits) = setup(8, 2);
+    // Same masking seed on both sides is NOT required — the verifier never
+    // uses the prover's rng — but the config constructor takes one.
+    let config = regev_plonky3::config::zk_config_seeded(ZkRng::seed_from_u64(99));
+    let proof = prove_encryptions(&config, &TEST_PARAMS, &pk, &cts, &wits);
+    assert!(proof.commitments.random.is_some(), "zk proof carries random commitment");
+    verify_encryptions(&config, &TEST_PARAMS, &pk, &cts, &proof).expect("zk proof verifies");
+}

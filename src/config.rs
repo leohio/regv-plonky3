@@ -6,14 +6,17 @@
 //! natively.
 
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
-use p3_challenger::DuplexChallenger;
+use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::Field;
-use p3_fri::{FriParameters, TwoAdicFriPcs};
-use p3_merkle_tree::MerkleTreeMmcs;
-use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_fri::{FriParameters, HidingFriPcs, TwoAdicFriPcs};
+use p3_keccak::{Keccak256Hash, KeccakF};
+use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs};
+use p3_symmetric::{
+    CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher, TruncatedPermutation,
+};
 use p3_uni_stark::StarkConfig;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -57,6 +60,60 @@ pub fn test_config() -> RegevStarkConfig {
     })
 }
 
+// --- Zero-knowledge variant (hiding FRI) ---------------------------------
+//
+// The witness (encryption randomness, noise, message) is secret, so for
+// deployments where the proof itself must not leak trace information, use
+// this config: `HidingFriPcs` masks committed polynomials with randomness
+// and adds a random codeword to the FRI batch (statistical zk).
+
+type ByteHash = Keccak256Hash;
+type U64Hash = PaddingFreeSponge<KeccakF, 25, 17, 4>;
+type ZkFieldHash = SerializingHasher<U64Hash>;
+type ZkCompress = CompressionFunctionFromHasher<U64Hash, 2, 4>;
+type ZkValMmcs = MerkleTreeHidingMmcs<
+    [Val; p3_keccak::VECTOR_LEN],
+    [u64; p3_keccak::VECTOR_LEN],
+    ZkFieldHash,
+    ZkCompress,
+    SmallRng,
+    2,
+    4,
+    4,
+>;
+type ZkChallengeMmcs = ExtensionMmcs<Val, Challenge, ZkValMmcs>;
+pub type ZkChallenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>;
+pub type ZkPcs = HidingFriPcs<Val, Dft, ZkValMmcs, ZkChallengeMmcs, SmallRng>;
+pub type RegevZkStarkConfig = StarkConfig<ZkPcs, Challenge, ZkChallenger>;
+
+/// Zero-knowledge config (hiding commitments + randomized FRI batch).
+/// Roughly 2x the proving cost of [`default_config`].
+pub fn zk_config() -> RegevZkStarkConfig {
+    zk_config_seeded(SmallRng::from_rng(&mut rand::rng()))
+}
+
+/// ZK config with caller-supplied masking randomness (for reproducible
+/// tests; use [`zk_config`] in production).
+pub fn zk_config_seeded(rng: SmallRng) -> RegevZkStarkConfig {
+    let u64_hash = U64Hash::new(KeccakF {});
+    let field_hash = ZkFieldHash::new(u64_hash);
+    let compress = ZkCompress::new(u64_hash);
+    let val_mmcs = ZkValMmcs::new(field_hash, compress, 0, rng.clone());
+    let challenge_mmcs = ZkChallengeMmcs::new(val_mmcs.clone());
+    let fri_params = FriParameters {
+        log_blowup: 2,
+        log_final_poly_len: 0,
+        max_log_arity: 1,
+        num_queries: 42,
+        commit_proof_of_work_bits: 8,
+        query_proof_of_work_bits: 16,
+        mmcs: challenge_mmcs,
+    };
+    let pcs = ZkPcs::new(Dft::default(), val_mmcs, fri_params, 4, rng);
+    let challenger = ZkChallenger::from_hasher(vec![], ByteHash {});
+    RegevZkStarkConfig::new(pcs, challenger)
+}
+
 struct FriParametersSpec {
     log_blowup: usize,
     log_final_poly_len: usize,
@@ -68,7 +125,7 @@ struct FriParametersSpec {
 
 fn make_config(spec: FriParametersSpec) -> RegevStarkConfig {
     // Fixed-seed RNG: the Poseidon2 round constants are public parameters.
-    let mut rng = SmallRng::seed_from_u64(0x5245_4745_56u64); // "REGEV"
+    let mut rng = SmallRng::seed_from_u64(0x52_4547_4556_u64); // "REGEV"
     let perm = Perm::new_from_rng_128(&mut rng);
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm.clone());

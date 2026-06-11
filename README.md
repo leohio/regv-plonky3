@@ -20,7 +20,9 @@ grinding (~100-bit conjectured FRI security):
 encrypt:    252 µs/op
 batch   1:  prove  9.2 ms              verify 12.9 ms   proof 226 KB
 batch   8:  prove 43.2 ms (5.4 ms/ct)  verify 19.7 ms   proof  52 KB/ct
-batch  32:  prove 161 ms  (5.0 ms/ct)  verify 48.3 ms   proof  33 KB/ct
+batch  32:  prove 163 ms  (5.1 ms/ct)  verify 46.7 ms   proof  33 KB/ct
+
+zk batch 8: prove 228 ms (28.5 ms/ct)  verify  4.1 ms   proof  69 KB/ct
 ```
 
 Reproduce with `cargo run --release --example bench` (pass `2048` for the
@@ -77,9 +79,12 @@ The witness evaluations `r(z), e₁(z), e₂(z), m(z), k₁(z), k₂(z)` never l
 the committed permutation trace: publishing them would leak ~124 bits per
 polynomial and allow dictionary attacks on low-entropy messages.
 
-Note: the default config is succinct but **not zero-knowledge** (plain FRI
-leaks negligible-but-nonzero information about the trace). For full zk,
-instantiate the same pipeline with Plonky3's `HidingFriPcs`.
+The default config is succinct but **not zero-knowledge** (plain FRI leaks
+negligible-but-nonzero information about the trace). `zk_config()` runs the
+same pipeline over Plonky3's `HidingFriPcs` (hiding Merkle commitments,
+masked polynomials, randomized quotient chunks) for statistical zk. Note
+hiding FRI requires `log_blowup >= 2` — with blowup 1 the masked polynomials
+have rate 1 and verification fails.
 
 ### Why no logUp lookups for the smallness checks?
 
@@ -148,7 +153,8 @@ src/config.rs  BabyBear + Poseidon2 + FRI configs
 
 ## Future work
 
-- `HidingFriPcs` config for full zero-knowledge.
+- Poseidon2-based hiding MMCS for a faster zk prover (current `zk_config`
+  uses Keccak, ~5x slower hashing than the non-zk Poseidon2 config).
 - Observe `(a, b)` once per batch instead of per instance (verifier is
   currently dominated by transcript hashing of public values).
 - Mersenne31 + Circle STARK backend (`q = 2³¹−1`; needs a Karatsuba/Toom

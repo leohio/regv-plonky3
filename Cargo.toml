@@ -28,6 +28,7 @@ serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 
 [dev-dependencies]
+p3-uni-stark = "0.5.3"
 postcard = { version = "1.1", features = ["alloc", "use-std"] }
 
 [features]

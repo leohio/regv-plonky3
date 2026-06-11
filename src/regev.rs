@@ -233,13 +233,13 @@ mod tests {
         let r_f = small_to_field(&w.r);
         let prod = full_poly_mul(&pk.a, &r_f);
         let mut lhs = prod.clone();
-        for i in 0..n {
-            lhs[i] += centered_to_field(w.e1u[i] as i64 - w.e1v[i] as i64);
+        for (l, (u, v)) in lhs.iter_mut().zip(w.e1u.iter().zip(&w.e1v)) {
+            *l += centered_to_field(*u as i64 - *v as i64);
         }
         let mut rhs = vec![F::ZERO; 2 * n];
-        for i in 0..n {
-            rhs[i] += ct.c1[i] + w.k1[i];
-            rhs[n + i] += w.k1[i];
+        for (i, (c, k)) in ct.c1.iter().zip(&w.k1).enumerate() {
+            rhs[i] += *c + *k;
+            rhs[n + i] += *k;
         }
         assert_eq!(lhs, rhs);
     }
