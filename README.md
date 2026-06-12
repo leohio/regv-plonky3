@@ -57,31 +57,48 @@ cargo run --release --example bench -- 2048  # n = 2048
 
 ## Benchmarks
 
-Apple Silicon (M-series), `release` profile, `n = 1024`, `default_config`
-(blowup 2, 84 queries, 16-bit grinding ≈ 100-bit conjectured FRI security).
-Reproduce with `cargo run --release --example bench`.
+Apple Silicon (M-series, 10 performance cores), `release` profile,
+`n = 1024`, `default_config` (blowup 2, 84 queries, 16-bit grinding ≈
+100-bit conjectured FRI security). Reproduce with
+`cargo run --release --example bench`.
 
 | Workload | Prove (total) | Prove / ct | Verify | Proof size | Proof / ct |
 |---|---:|---:|---:|---:|---:|
-| encrypt (no proof) | 241 µs | — | — | — | — |
-| batch of 1 | 11.3 ms | 11.3 ms | 11.7 ms | 226 KB | 226 KB |
-| batch of 8 | 42.4 ms | 5.3 ms | 18.4 ms | 415 KB | 52 KB |
-| batch of 32 | 163 ms | 5.1 ms | 43.4 ms | 1.06 MB | 33 KB |
-| zk, batch of 8 (`zk_config`) | 230 ms | 28.7 ms | 4.4 ms | 551 KB | 69 KB |
-| + range proof, batch of 8 | 45.4 ms | 5.7 ms | 20.3 ms | 433 KB | 54 KB |
-| transfer (3 cts + conservation), batch of 8 | 58.0 ms | 7.3 ms/tx | 30.8 ms | 722 KB | 90 KB/tx |
+| encrypt (no proof) | 125 µs | — | — | — | — |
+| batch of 1 | 4.9 ms | 4.9 ms | 9.6 ms | 227 KB | 227 KB |
+| batch of 8 | 25.0 ms | 3.1 ms | 18.0 ms | 415 KB | 52 KB |
+| batch of 32 | 83.9 ms | 2.6 ms | 45.8 ms | 1.06 MB | 33 KB |
+| zk, batch of 8 (`zk_config`) | 114 ms | 14.3 ms | 4.4 ms | 551 KB | 69 KB |
+| + range proof, batch of 8 | 23.2 ms | 2.9 ms | 18.1 ms | 433 KB | 54 KB |
+| transfer (3 cts + conservation), batch of 8 | 36.3 ms | 4.5 ms/tx | 28.7 ms | 722 KB | 90 KB/tx |
 
 Takeaways:
 
 - **Batching is essential.** FRI has a large fixed cost; at batch 32 the
-  per-ciphertext prove time drops to ~5 ms and the proof to ~33 KB/ct.
+  per-ciphertext prove time drops to ~2.6 ms and the proof to ~33 KB/ct.
 - **The range proof is cheap**: ~1 ms/ct and ~2 KB/ct on top of the
   encryption proof (it adds 5 witness columns, all degree-≤2 constraints).
 - **ZK costs ~2× to prove** (hiding commitments + randomized quotient chunks,
   and a Keccak-based MMCS) but verifies fast.
-- **A transfer is cheaper than 3 separate encryption proofs** (7.3 ms vs
-  ~16 ms): the three ciphertexts share one instance, one set of `a, b`
+- **A transfer is cheaper than 3 separate encryption proofs** (4.5 ms vs
+  ~9 ms): the three ciphertexts share one instance, one set of `a, b`
   columns and one evaluation challenge.
+
+### Thread pool
+
+These traces are short (height = `n`), so Plonky3's internal data-parallelism
+is fine-grained. With the default Rayon pool (= all logical CPUs) the
+work-stealing and allocation overhead *oversubscribes* — proving was ~2×
+slower at 14 threads than at ~6. The library therefore caps the global pool
+at 6 threads on first use (see [`pool::init_thread_pool`](src/pool.rs)),
+which roughly **halved prove time** across the board (and cut kernel/`sys`
+time ~10×). Override with the standard `RAYON_NUM_THREADS`, or with
+`REGEV_PROVE_THREADS`; if you have already built your own global Rayon pool,
+the cap is skipped and yours is used.
+
+The NTT used by keygen/encrypt/decrypt precomputes its twiddle factors once
+per size into a thread-local cache (`encrypt` 243 → 125 µs at `n = 1024`),
+rather than recomputing roots of unity on every transform.
 
 ---
 
@@ -394,6 +411,7 @@ src/stark/     vendored p3-batch-stark prover/verifier (gadget swapped)
 src/transfer.rs transfer AIR (ripple-carry conservation) + prove/verify
 src/prove.rs   prove/verify wrappers (+ statement binding, range variants)
 src/config.rs  BabyBear + Poseidon2 + (plain / hiding) FRI configs
+src/pool.rs    Rayon thread-pool sizing (avoids oversubscription)
 ```
 
 Tests: [`tests/prove_verify.rs`](tests/prove_verify.rs) (end-to-end + soundness,
