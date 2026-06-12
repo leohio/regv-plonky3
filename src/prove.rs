@@ -172,6 +172,7 @@ where
         + for<'a> Air<ProverConstraintFolderWithLookups<'a, SC>>
         + for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>,
 {
+    crate::pool::init_thread_pool();
     assert!(!ciphertexts.is_empty(), "empty batch");
     assert_eq!(ciphertexts.len(), witnesses.len());
     assert_eq!(pk.a.len(), params.n);
@@ -261,6 +262,7 @@ where
     RegevEncAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
         + for<'a> Air<VerifierConstraintFolderWithLookups<'a, SC>>,
 {
+    crate::pool::init_thread_pool();
     if ciphertexts.is_empty() {
         return Err(RegevVerifyError::Shape("empty batch"));
     }

@@ -130,6 +130,7 @@ pub mod config;
 pub mod gadget;
 pub mod ntt;
 pub mod params;
+pub mod pool;
 pub mod prove;
 pub mod regev;
 pub mod stark;
@@ -140,6 +141,7 @@ pub use config::{
     default_config, test_config, zk_config, Challenge, RegevStarkConfig, RegevZkStarkConfig, Val,
 };
 pub use params::RegevParams;
+pub use pool::init_thread_pool;
 pub use prove::{
     prove_encryptions, prove_encryptions_with_range, verify_encryptions,
     verify_encryptions_with_range, RegevProof, RegevVerifyError,

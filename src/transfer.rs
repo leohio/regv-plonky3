@@ -388,6 +388,7 @@ where
         + for<'a> Air<ProverConstraintFolderWithLookups<'a, SC>>
         + for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>,
 {
+    crate::pool::init_thread_pool();
     assert!(!transfers.is_empty(), "empty batch");
     assert_eq!(transfers.len(), witnesses.len());
     assert_eq!(pk.a.len(), params.n);
@@ -434,6 +435,7 @@ where
     RegevTransferAir<Val<SC>>: Air<SymbolicAirBuilder<Val<SC>, SC::Challenge>>
         + for<'a> Air<VerifierConstraintFolderWithLookups<'a, SC>>,
 {
+    crate::pool::init_thread_pool();
     if transfers.is_empty() {
         return Err(RegevVerifyError::Shape("empty batch"));
     }
