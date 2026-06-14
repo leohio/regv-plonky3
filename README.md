@@ -100,6 +100,35 @@ The NTT used by keygen/encrypt/decrypt precomputes its twiddle factors once
 per size into a thread-local cache (`encrypt` 243 → 125 µs at `n = 1024`),
 rather than recomputing roots of unity on every transform.
 
+### Cross-target determinism (wasm ↔ native)
+
+A proof generated on one target must verify on another, so the Fiat-Shamir
+transcript must be byte-identical everywhere. The transcript depends only on
+field arithmetic and the Poseidon2 permutation — both bit-identical across
+targets — **provided the permutation's round constants are themselves
+target-independent**.
+
+For that reason the permutation is built from Plonky3's canonical
+compile-time constants ([`config::canonical_perm`](src/config.rs)). Do **not**
+build it from `rand::rngs::SmallRng`: `SmallRng` is `Xoshiro256++` on 64-bit
+targets and `Xoshiro128++` on 32-bit `wasm32`, so a fixed seed yields
+*different* constants per pointer width. That silently forks the transcript
+and makes a wasm-generated proof fail native verification (surfacing as FRI
+`InvalidPowWitness`) and vice-versa, even though each self-verifies.
+
+[`portability::transcript_digest`](src/portability.rs) fingerprints the
+transcript primitives; `tests/portability.rs` pins the golden value and runs
+on both targets:
+
+```sh
+cargo test --test portability                            # native
+wasm-pack test --node --no-default-features --test portability   # wasm32
+```
+
+Build the library for `wasm32` with `--no-default-features` (the `parallel` /
+Rayon feature needs threads); the prove/verify pipeline is otherwise
+target-agnostic.
+
 ---
 
 ## What is proven

@@ -43,6 +43,9 @@ pub fn init_thread_pool() {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n >= 1)
             .unwrap_or_else(default_threads);
+        #[cfg(feature = "parallel")]
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
+        #[cfg(not(feature = "parallel"))]
+        let _ = n; // no Rayon without the `parallel` feature (e.g. wasm)
     });
 }

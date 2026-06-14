@@ -131,6 +131,7 @@ pub mod gadget;
 pub mod ntt;
 pub mod params;
 pub mod pool;
+pub mod portability;
 pub mod prove;
 pub mod regev;
 pub mod stark;

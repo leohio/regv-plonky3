@@ -5,7 +5,7 @@
 //! NTT-friendly, so the *encryptor* also gets fast negacyclic multiplication
 //! natively.
 
-use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
 use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
@@ -24,7 +24,18 @@ use rand::SeedableRng;
 pub type Val = BabyBear;
 pub type Challenge = BinomialExtensionField<Val, 4>;
 
-type Perm = Poseidon2BabyBear<16>;
+pub type Perm = Poseidon2BabyBear<16>;
+
+/// The canonical Poseidon2-BabyBear permutation used everywhere in this crate
+/// (transcript, Merkle hashing). It uses Plonky3's published compile-time
+/// round constants, **not** an RNG, so it is byte-identical on every target.
+///
+/// Building the permutation from `rand::rngs::SmallRng` instead would fork the
+/// transcript across pointer widths (32-bit wasm vs 64-bit native); see
+/// [`crate::portability`].
+pub fn canonical_perm() -> Perm {
+    default_babybear_poseidon2_16()
+}
 type Hash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type Compress = TruncatedPermutation<Perm, 2, 8, 16>;
 type ValMmcs =
@@ -124,9 +135,19 @@ struct FriParametersSpec {
 }
 
 fn make_config(spec: FriParametersSpec) -> RegevStarkConfig {
-    // Fixed-seed RNG: the Poseidon2 round constants are public parameters.
-    let mut rng = SmallRng::seed_from_u64(0x52_4547_4556_u64); // "REGEV"
-    let perm = Perm::new_from_rng_128(&mut rng);
+    // Poseidon2 permutation drives the Fiat-Shamir transcript, so its round
+    // constants MUST be identical on every target. We use Plonky3's canonical
+    // published BabyBear constants (`default_babybear_poseidon2_16`): they are
+    // compile-time tables, not derived from any RNG.
+    //
+    // NOTE: do NOT build the permutation from `rand::rngs::SmallRng` here.
+    // `SmallRng` is pointer-width-dependent (Xoshiro128++ on 32-bit wasm32,
+    // Xoshiro256++ on 64-bit native), so a fixed seed yields *different* round
+    // constants per target — which silently forks the transcript and makes a
+    // wasm-generated proof fail native verification (FRI `InvalidPowWitness`)
+    // and vice-versa. See `portability::transcript_digest` for the regression
+    // guard and `tests/portability.rs` for the golden cross-target values.
+    let perm = canonical_perm();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm.clone());
     let val_mmcs = ValMmcs::new(hash, compress, 0);

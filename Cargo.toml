@@ -26,13 +26,17 @@ p3-util = "0.5.3"
 rand = "0.10.1"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
-rayon = "1"
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 p3-uni-stark = "0.5.3"
 postcard = { version = "1.1", features = ["alloc", "use-std"] }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [features]
 default = ["parallel"]
-parallel = ["p3-maybe-rayon/parallel"]
+parallel = ["dep:rayon", "p3-maybe-rayon/parallel"]
