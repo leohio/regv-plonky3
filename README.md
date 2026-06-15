@@ -129,6 +129,35 @@ Build the library for `wasm32` with `--no-default-features` (the `parallel` /
 Rayon feature needs threads); the prove/verify pipeline is otherwise
 target-agnostic.
 
+### Browser proving speed
+
+Measured in node (Apple Silicon), one Production channel-tx / transfer proof
+at `n = 128` (the parameters a payment-channel deployment uses),
+single-threaded and scalar — i.e. no Web Workers, no SIMD:
+
+| build | one proof |
+|---|---:|
+| **release wasm, single-thread** | **~25 ms** |
+| debug wasm, single-thread | ~900 ms |
+| native, single-thread | ~8 ms |
+
+Two consequences:
+
+- **Always ship a release wasm build.** Debug is ~36× slower; that single
+  difference dwarfs everything else. `tests/wasm_bench.rs` guards against
+  multi-second regressions (`wasm-pack test --release --node
+  --no-default-features --test wasm_bench`).
+- **At ~25 ms, wasm threading is unnecessary for this proof.** Enabling the
+  `parallel` feature on wasm pulls in
+  [`wasm-bindgen-rayon`](https://docs.rs/wasm-bindgen-rayon), which needs
+  `SharedArrayBuffer` (COOP/COEP headers) and an awaited `initThreadPool`
+  *before* any `par_iter` runs — and if that setup is incomplete, Rayon work
+  can stall in the browser, turning a 25 ms proof into seconds. Unless you are
+  proving large batches, prefer the single-threaded `--no-default-features`
+  wasm build: it is simpler, header-free, and already fast. So if a browser
+  send takes seconds, suspect a debug build or the worker pool — not the proof
+  math (which `wasm_bench` shows is tens of ms).
+
 ---
 
 ## What is proven

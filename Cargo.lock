@@ -865,6 +865,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "hashbrown 0.16.1",
+ "js-sys",
  "p3-air",
  "p3-baby-bear",
  "p3-batch-stark",
